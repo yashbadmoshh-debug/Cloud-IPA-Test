@@ -1,0 +1,78 @@
+name: Build IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_name:
+        description: "App name (letters and numbers only)"
+        required: true
+        default: "MyApp"
+      bundle_id:
+        description: "Bundle identifier"
+        required: true
+        default: "com.example.myapp"
+
+permissions:
+  contents: write   # needed to publish the IPA as a release
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate Xcode project from Sources/
+        env:
+          RAW_NAME: ${{ inputs.app_name }}
+          RAW_BUNDLE: ${{ inputs.bundle_id }}
+        run: |
+          APP=$(echo "$RAW_NAME" | tr -cd 'A-Za-z0-9'); APP=${APP:-MyApp}
+          BUNDLE=$(echo "$RAW_BUNDLE" | tr -cd 'A-Za-z0-9.-'); BUNDLE=${BUNDLE:-com.example.myapp}
+          echo "APP=$APP" >> "$GITHUB_ENV"
+          brew install xcodegen
+          cat > project.yml <<YML
+          name: $APP
+          targets:
+            $APP:
+              type: application
+              platform: iOS
+              deploymentTarget: "16.0"
+              sources: [Sources]
+              settings:
+                base:
+                  PRODUCT_BUNDLE_IDENTIFIER: $BUNDLE
+                  GENERATE_INFOPLIST_FILE: YES
+                  INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+                  INFOPLIST_KEY_UILaunchScreen_Generation: YES
+                  INFOPLIST_KEY_CFBundleDisplayName: $APP
+                  MARKETING_VERSION: 1.0
+                  CURRENT_PROJECT_VERSION: 1
+                  SWIFT_VERSION: 5.0
+          YML
+          xcodegen generate
+
+      - name: Build unsigned archive
+        run: |
+          xcodebuild -project "$APP.xcodeproj" \
+            -scheme "$APP" \
+            -configuration Release \
+            -sdk iphoneos \
+            -archivePath build/App.xcarchive \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            archive
+
+      - name: Package IPA
+        run: |
+          mkdir -p Payload
+          cp -R build/App.xcarchive/Products/Applications/*.app Payload/
+          zip -qry "$APP.ipa" Payload
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "ipa-${{ github.run_number }}" "$APP.ipa" \
+            --title "$APP build ${{ github.run_number }}" \
+            --notes "Unsigned IPA built from ${{ github.sha }}"
